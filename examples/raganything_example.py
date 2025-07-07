@@ -15,13 +15,17 @@ import asyncio
 import logging
 import logging.config
 from pathlib import Path
+import base64
+import io
+from PIL import Image
 
 # Add project root directory to Python path
 import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+# Import Gemini instead of OpenAI
+import google.generativeai as genai
 from lightrag.utils import EmbeddingFunc, logger, set_verbose_debug
 from raganything import RAGAnything, RAGAnythingConfig
 
@@ -88,6 +92,8 @@ async def process_with_rag(
     api_key: str,
     base_url: str = None,
     working_dir: str = None,
+    custom_query: str = None,
+    interactive: bool = False,
 ):
     """
     Process document with RAGAnything
@@ -95,9 +101,11 @@ async def process_with_rag(
     Args:
         file_path: Path to the document
         output_dir: Output directory for RAG results
-        api_key: OpenAI API key
-        base_url: Optional base URL for API
+        api_key: Gemini API key
+        base_url: Optional base URL for API (not used for Gemini)
         working_dir: Working directory for RAG storage
+        custom_query: Custom query to ask (optional)
+        interactive: Enable interactive query mode
     """
     try:
         # Create RAGAnything configuration
@@ -109,64 +117,79 @@ async def process_with_rag(
             enable_equation_processing=True,
         )
 
-        # Define LLM model function
-        def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
-            return openai_complete_if_cache(
-                "gpt-4o-mini",
-                prompt,
-                system_prompt=system_prompt,
-                history_messages=history_messages,
-                api_key=api_key,
-                base_url=base_url,
-                **kwargs,
-            )
+        # Configure Gemini API
+        genai.configure(api_key=api_key)
 
-        # Define vision model function for image processing
+        # Define LLM model function using Gemini Flash
+        def llm_model_func(prompt, system_prompt=None, history_messages=[], **kwargs):
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                
+                # Construct full prompt with system prompt and history
+                full_prompt = ""
+                if system_prompt:
+                    full_prompt += f"System: {system_prompt}\n\n"
+                
+                for msg in history_messages:
+                    role = msg.get('role', 'user')
+                    content = msg.get('content', '')
+                    full_prompt += f"{role.capitalize()}: {content}\n"
+                
+                full_prompt += f"User: {prompt}"
+                
+                response = model.generate_content(full_prompt)
+                return response.text
+            except Exception as e:
+                logger.error(f"Gemini API error: {str(e)}")
+                raise
+
+        # Define vision model function for image processing using Gemini Flash
         def vision_model_func(
             prompt, system_prompt=None, history_messages=[], image_data=None, **kwargs
         ):
-            if image_data:
-                return openai_complete_if_cache(
-                    "gpt-4o",
-                    "",
-                    system_prompt=None,
-                    history_messages=[],
-                    messages=[
-                        {"role": "system", "content": system_prompt}
-                        if system_prompt
-                        else None,
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{image_data}"
-                                    },
-                                },
-                            ],
-                        }
-                        if image_data
-                        else {"role": "user", "content": prompt},
-                    ],
-                    api_key=api_key,
-                    base_url=base_url,
-                    **kwargs,
-                )
-            else:
-                return llm_model_func(prompt, system_prompt, history_messages, **kwargs)
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                
+                if image_data:
+                    # Convert base64 image data to PIL Image
+                    image_bytes = base64.b64decode(image_data)
+                    image = Image.open(io.BytesIO(image_bytes))
+                    
+                    # Construct prompt with system prompt if provided
+                    full_prompt = ""
+                    if system_prompt:
+                        full_prompt += f"{system_prompt}\n\n"
+                    full_prompt += prompt
+                    
+                    response = model.generate_content([full_prompt, image])
+                    return response.text
+                else:
+                    # Fall back to text-only processing
+                    return llm_model_func(prompt, system_prompt, history_messages, **kwargs)
+            except Exception as e:
+                logger.error(f"Gemini Vision API error: {str(e)}")
+                raise
 
-        # Define embedding function
+        # Define embedding function using Gemini embeddings
+        def gemini_embedding_func(texts):
+            try:
+                embeddings = []
+                for text in texts:
+                    result = genai.embed_content(
+                        model="models/embedding-001",
+                        content=text,
+                        task_type="retrieval_document"
+                    )
+                    embeddings.append(result['embedding'])
+                return embeddings
+            except Exception as e:
+                logger.error(f"Gemini Embedding API error: {str(e)}")
+                raise
+
         embedding_func = EmbeddingFunc(
-            embedding_dim=3072,
+            embedding_dim=768,  # Gemini embedding dimension
             max_token_size=8192,
-            func=lambda texts: openai_embed(
-                texts,
-                model="text-embedding-3-large",
-                api_key=api_key,
-                base_url=base_url,
-            ),
+            func=gemini_embedding_func,
         )
 
         # Initialize RAGAnything with new dataclass structure
@@ -182,54 +205,77 @@ async def process_with_rag(
             file_path=file_path, output_dir=output_dir, parse_method="auto"
         )
 
-        # Example queries - demonstrating different query approaches
-        logger.info("\nQuerying processed document:")
+        logger.info("\n" + "="*50)
+        logger.info("DOCUMENT PROCESSING COMPLETED!")
+        logger.info("="*50)
 
-        # 1. Pure text queries using aquery()
-        text_queries = [
-            "What is the main content of the document?",
-            "What are the key topics discussed?",
-        ]
-
-        for query in text_queries:
-            logger.info(f"\n[Text Query]: {query}")
-            result = await rag.aquery(query, mode="hybrid")
+        # Handle different query modes
+        if custom_query:
+            # Single custom query mode
+            logger.info(f"\n[Custom Query]: {custom_query}")
+            result = await rag.aquery(custom_query, mode="hybrid")
             logger.info(f"Answer: {result}")
+            
+        elif interactive:
+            # Interactive query mode
+            logger.info("\n🤖 Interactive Query Mode Started!")
+            logger.info("Type your questions below. Type 'quit' or 'exit' to stop.\n")
+            
+            while True:
+                try:
+                    query = input("❓ Your question: ").strip()
+                    
+                    if query.lower() in ['quit', 'exit', 'q']:
+                        logger.info("👋 Goodbye!")
+                        break
+                        
+                    if not query:
+                        print("Please enter a question.")
+                        continue
+                        
+                    logger.info(f"\n[Interactive Query]: {query}")
+                    result = await rag.aquery(query, mode="hybrid")
+                    logger.info(f"🔍 Answer: {result}\n")
+                    
+                except KeyboardInterrupt:
+                    logger.info("\n👋 Goodbye!")
+                    break
+                except Exception as e:
+                    logger.error(f"Error processing query: {str(e)}")
+                    
+        else:
+            # Default example queries mode
+            logger.info("\nRunning example queries:")
 
-        # 2. Multimodal query with specific multimodal content using aquery_with_multimodal()
-        logger.info(
-            "\n[Multimodal Query]: Analyzing performance data in context of document"
-        )
-        multimodal_result = await rag.aquery_with_multimodal(
-            "Compare this performance data with any similar results mentioned in the document",
-            multimodal_content=[
-                {
-                    "type": "table",
-                    "table_data": """Method,Accuracy,Processing_Time
-                                RAGAnything,95.2%,120ms
-                                Traditional_RAG,87.3%,180ms
-                                Baseline,82.1%,200ms""",
-                    "table_caption": "Performance comparison results",
-                }
-            ],
-            mode="hybrid",
-        )
-        logger.info(f"Answer: {multimodal_result}")
+            # 1. Pure text queries using aquery()
+            text_queries = [
+                "What is the main content of the document?",
+                "What are the key topics discussed?",
+                "Summarize the document in 3 key points",
+            ]
 
-        # 3. Another multimodal query with equation content
-        logger.info("\n[Multimodal Query]: Mathematical formula analysis")
-        equation_result = await rag.aquery_with_multimodal(
-            "Explain this formula and relate it to any mathematical concepts in the document",
-            multimodal_content=[
-                {
-                    "type": "equation",
-                    "latex": "F1 = 2 \\cdot \\frac{precision \\cdot recall}{precision + recall}",
-                    "equation_caption": "F1-score calculation formula",
-                }
-            ],
-            mode="hybrid",
-        )
-        logger.info(f"Answer: {equation_result}")
+            for query in text_queries:
+                logger.info(f"\n[Example Query]: {query}")
+                result = await rag.aquery(query, mode="hybrid")
+                logger.info(f"Answer: {result}")
+
+            # 2. Example multimodal query
+            logger.info("\n[Example Multimodal Query]: Performance analysis")
+            multimodal_result = await rag.aquery_with_multimodal(
+                "Compare this performance data with any similar results mentioned in the document",
+                multimodal_content=[
+                    {
+                        "type": "table",
+                        "table_data": """Method,Accuracy,Processing_Time
+                                    RAGAnything,95.2%,120ms
+                                    Traditional_RAG,87.3%,180ms
+                                    Baseline,82.1%,200ms""",
+                        "table_caption": "Performance comparison results",
+                    }
+                ],
+                mode="hybrid",
+            )
+            logger.info(f"Answer: {multimodal_result}")
 
     except Exception as e:
         logger.error(f"Error processing with RAG: {str(e)}")
@@ -240,7 +286,7 @@ async def process_with_rag(
 
 def main():
     """Main function to run the example"""
-    parser = argparse.ArgumentParser(description="MinerU RAG Example")
+    parser = argparse.ArgumentParser(description="Gemini-powered RAG Example")
     parser.add_argument("file_path", help="Path to the document to process")
     parser.add_argument(
         "--working_dir", "-w", default="./rag_storage", help="Working directory path"
@@ -250,17 +296,28 @@ def main():
     )
     parser.add_argument(
         "--api-key",
-        default=os.getenv("OPENAI_API_KEY"),
-        help="OpenAI API key (defaults to OPENAI_API_KEY env var)",
+        default=os.getenv("GOOGLE_API_KEY"),
+        help="Gemini API key (defaults to GOOGLE_API_KEY env var)",
     )
-    parser.add_argument("--base-url", help="Optional base URL for API")
+    parser.add_argument("--base-url", help="Optional base URL for API (not used for Gemini)")
+    
+    # Query options
+    parser.add_argument(
+        "--query", "-q", 
+        help="Ask a specific question about the document"
+    )
+    parser.add_argument(
+        "--interactive", "-i", 
+        action="store_true",
+        help="Enable interactive query mode (ask multiple questions)"
+    )
 
     args = parser.parse_args()
 
     # Check if API key is provided
     if not args.api_key:
-        logger.error("Error: OpenAI API key is required")
-        logger.error("Set OPENAI_API_KEY environment variable or use --api-key option")
+        logger.error("Error: Gemini API key is required")
+        logger.error("Set GOOGLE_API_KEY environment variable or use --api-key option")
         return
 
     # Create output directory if specified
@@ -270,7 +327,13 @@ def main():
     # Process with RAG
     asyncio.run(
         process_with_rag(
-            args.file_path, args.output, args.api_key, args.base_url, args.working_dir
+            args.file_path, 
+            args.output, 
+            args.api_key, 
+            args.base_url, 
+            args.working_dir,
+            args.query,
+            args.interactive
         )
     )
 

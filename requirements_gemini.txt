@@ -1,0 +1,13 @@
+# Core dependencies for Gemini-powered RAG-Anything
+google-generativeai>=0.3.0
+lightrag-hku
+mineru[core]
+huggingface_hub
+python-dotenv
+Pillow>=10.0.0
+
+# Optional dependencies for additional file format support
+reportlab>=4.0.0  # For TXT, MD to PDF conversion
+
+# Note: LibreOffice is required for Office documents (.doc, .docx, .ppt, .pptx, .xls, .xlsx)
+# Install separately from: https://www.libreoffice.org/download/download/
