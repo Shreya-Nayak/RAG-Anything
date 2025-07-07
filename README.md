@@ -6,6 +6,10 @@
 
 # 🚀 RAG-Anything: All-in-One RAG System
 
+> **🌟 NEW: Google Gemini Integration Available!**  
+> This repository now includes Google Gemini Flash integration for enhanced performance and capabilities.  
+> **👉 See [README_GEMINI.md](README_GEMINI.md) for the complete Gemini-powered setup guide.**
+
 <div align="center">
   <img src="https://readme-typing-svg.herokuapp.com?font=Orbitron&size=24&duration=3000&pause=1000&color=00D9FF&center=true&vCenter=true&width=600&lines=Welcome+to+RAG-Anything;Next-Gen+Multimodal+RAG+System;Powered+by+Advanced+AI+Technology" alt="Typing Animation" />
 </div>
